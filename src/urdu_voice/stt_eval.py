@@ -25,6 +25,8 @@ WHISPER_SIZES = ["small", "medium", "large-v3-turbo"]
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 SAMPLE_RATE = 16000
 
+RETRYABLE = ("429", "500", "503", "ReadError", "ConnectError", "RemoteProtocolError", "Timeout")
+
 # ---------- Text normalization: only count real recognition mistakes ----------
 
 DIACRITICS = re.compile(r"[\u064B-\u065F\u0670\u200C\u200D]")  # zer/zabar/pesh etc. and zero-width joiners
@@ -94,8 +96,9 @@ def gemini_transcriber():
             try:
                 response = client.models.generate_content(model=GEMINI_MODEL, contents=[prompt, part])
                 return response.text or ""
-            except Exception as e:  # rate limit / overloaded: wait and retry
-                if attempt == 4 or not any(code in str(e) for code in ("429", "503")):
+            except Exception as e:  # rate limit, overloaded server or dropped connection: wait and retry
+                error = f"{type(e).__name__} {e}"
+                if attempt == 4 or not any(word in error for word in RETRYABLE):
                     raise
                 time.sleep(10 * 2 ** attempt)
     return transcribe
