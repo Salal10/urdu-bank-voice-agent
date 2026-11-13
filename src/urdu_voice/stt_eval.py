@@ -27,6 +27,9 @@ SAMPLE_RATE = 16000
 
 RETRYABLE = ("429", "500", "503", "ReadError", "ConnectError", "RemoteProtocolError", "Timeout")
 
+# Domain vocabulary given to Whisper before it listens, so it spells banking words the bank's way.
+BANKING_HINT = ("بینک ہیلپ لائن پر کسٹمر کی کال: اکاؤنٹ، بیلنس، کارڈ، اے ٹی ایم، ٹرانزیکشن، ٹرانسفر، "
+                "برانچ، چیک بک، لون، قسط، تنخواہ، شکایت، بلاک، ایکٹیویٹ، موبائل ایپ، لاگ ان، روپے۔")
 # ---------- Text normalization: only count real recognition mistakes ----------
 
 DIACRITICS = re.compile(r"[\u064B-\u065F\u0670\u200C\u200D]")  # zer/zabar/pesh etc. and zero-width joiners
@@ -74,11 +77,11 @@ def numbers_correct(reference: str, hypothesis: str) -> bool | None:
 
 # ---------- Models: each one is a function audio -> text ----------
 
-def whisper_transcriber(size: str):
+def whisper_transcriber(size: str, hint: str | None = None):
     model = WhisperModel(size, device="cpu", compute_type="int8")
 
     def transcribe(audio: np.ndarray) -> str:
-        segments, _ = model.transcribe(audio, language="ur", beam_size=5)
+        segments, _ = model.transcribe(audio, language="ur", beam_size=5, initial_prompt=hint)
         return " ".join(segment.text for segment in segments)
     return transcribe
 
@@ -128,8 +131,12 @@ def load_clips() -> list[tuple[str, Path, str]]:
     return clips
 
 
-def main(model_name: str) -> None:
-    transcribe = gemini_transcriber() if model_name == "gemini" else whisper_transcriber(model_name)
+def main(model_name: str, use_hint: bool = False) -> None:
+    if model_name == "gemini":
+        transcribe = gemini_transcriber()
+    else:
+        transcribe = whisper_transcriber(model_name, BANKING_HINT if use_hint else None)
+    run_name = f"{model_name}_hint" if use_hint else model_name
     rows = []
     for set_name, path, reference in load_clips():
         audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)  # wav or m4a -> 16 kHz mono floats
@@ -152,13 +159,13 @@ def main(model_name: str) -> None:
         print(f"{path.name}: CER {rows[-1]['cer']:.2f}  {seconds:.1f}s  {hypothesis.strip()[:60]}")
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    output = RESULTS_DIR / f"stt_{model_name}.csv"
+    output = RESULTS_DIR / f"stt_{run_name}.csv"
     with output.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"\n{model_name}  (saved to {output})")
+    print(f"\n{run_name}  (saved to {output})")
     for set_name in TEST_SETS:
         part = [r for r in rows if r["set"] == set_name]
         if not part:
@@ -172,6 +179,9 @@ def main(model_name: str) -> None:
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else "small"
+    use_hint = "--hint" in sys.argv
     if name not in WHISPER_SIZES + ["gemini"]:
         sys.exit(f"Model must be one of: {', '.join(WHISPER_SIZES)}, gemini")
-    main(name)
+    if use_hint and name == "gemini":
+        sys.exit("--hint is only for Whisper models")
+    main(name, use_hint)
