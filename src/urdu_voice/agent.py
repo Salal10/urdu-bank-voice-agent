@@ -18,6 +18,10 @@ MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 RETRYABLE = ("429", "500", "503", "ReadError", "ConnectError", "RemoteProtocolError", "Timeout")
 GREETING = "السلام علیکم، بینک ہیلپ لائن میں خوش آمدید۔ میں آپ کی کیا مدد کر سکتا ہوں؟"
 
+# Digit words as Whisper writes them, including its common misspelling سفر for صفر (zero).
+SPOKEN_DIGITS = {"صفر": "0", "سفر": "0", "زیرو": "0", "ایک": "1", "دو": "2", "تین": "3", "چار": "4",
+                 "پانچ": "5", "چھ": "6", "چھے": "6", "سات": "7", "آٹھ": "8", "نو": "9"}
+
 SYSTEM_PROMPT = f"""You are the phone assistant of a Pakistani bank's helpline.
 Callers speak Urdu, often mixed with English words. Their words come from speech recognition, so expect small spelling mistakes.
 
@@ -35,10 +39,24 @@ Rules:
 - Blocking a card has two steps: block_card, then read the last 4 digits back and ask the caller to confirm,
   then confirm_block_card only after they say yes.
 - If the caller didn't make a transaction or money was wrongly deducted, file a DisputedTransaction complaint and tell them the complaint number.
+- If verification fails, read back the account number you used so the caller can correct it.
 - If a tool returns an error, follow what the error says.
-- Transfer to an officer when the caller asks for a person, is locked out, or wants something your tools can't do.
+- Transfer to an officer only when the caller asks for a person, the call is locked after failed verification,
+  or they want something your tools can't do. Don't transfer just because the caller isn't verified yet: ask again.
 - Today is {date.today():%A %d %B %Y}."""
 
+def numbers_from_speech(text: str) -> str:
+    """'ایک صفر چار سات تین تین آٹھ دو' -> '10473382'. Spoken account, card and CNIC numbers become digits
+    in code, so the model doesn't have to assemble them. Only runs of 3+ digit words: 'دو دن' stays as it is."""
+    words, out, run = text.split(), [], []
+    for word in words + [""]:
+        if word in SPOKEN_DIGITS:
+            run.append(word)
+            continue
+        out.append("".join(SPOKEN_DIGITS[w] for w in run) if len(run) >= 3 else " ".join(run))
+        out.append(word)
+        run = []
+    return " ".join(w for w in out if w)
 
 def make_tools(call: Call, trace: list[dict], state: dict) -> list:
     """Gemini's tools, all bound to this one call. The model never sees or chooses a session.
@@ -161,6 +179,7 @@ class Agent:
 
     def reply(self, caller_text: str) -> str:
         self.state["turn"] += 1
+        caller_text = numbers_from_speech(caller_text)
         for attempt in range(5):
             try:
                 return (self.chat.send_message(caller_text).text or "").strip()

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Urdu Bank Helpline</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;600&display=swap">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #0f7b5f; --accent-text: #ffffff; --caller: #eef4ff;
+    --stt: #3b82f6; --agent: #f59e0b; --tts: #10b981; --danger: #d92d20;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --text: #e6e9ef; --muted: #98a2b3; --line: #2c3340;
+      --accent: #22a37f; --caller: #1f2a3d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 140px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .legend { display: flex; gap: 14px; font-size: 13px; color: var(--muted); margin-bottom: 16px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  #log { display: flex; flex-direction: column; gap: 12px; }
+  .msg { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .msg.caller { background: var(--caller); }
+  .who { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  .urdu { font-family: "Noto Nastaliq Urdu", serif; direction: rtl; text-align: right; font-size: 18px; line-height: 2.2; }
+  .tools { margin-top: 6px; font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--muted); word-break: break-word; }
+  .bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 10px; background: var(--line); }
+  .bar span { display: block; height: 100%; }
+  .times { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); padding: 14px 16px; }
+  .controls { max-width: 720px; margin: 0 auto; display: flex; gap: 12px; align-items: center; }
+  button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); padding: 10px 16px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #talk { flex: 1; background: var(--accent); color: var(--accent-text); border: none; padding: 16px; font-weight: 600; user-select: none; touch-action: none; }
+  #talk.recording { background: var(--danger); }
+  #status { font-size: 13px; color: var(--muted); max-width: 720px; margin: 6px auto 0; min-height: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Urdu Bank Helpline</h1>
+  <p class="sub">Hold the button (or Space), speak in Urdu, let go. Made-up customers only.</p>
+  <div class="legend">
+    <span><i style="background:var(--stt)"></i>Speech to text (Whisper)</span>
+    <span><i style="background:var(--agent)"></i>Agent (Gemini + bank tools)</span>
+    <span><i style="background:var(--tts)"></i>Text to speech (MMS)</span>
+  </div>
+  <div id="log"></div>
+</main>
+<footer>
+  <div class="controls">
+    <button id="start">New call</button>
+    <button id="talk" disabled>Hold to talk</button>
+  </div>
+  <div id="status">Press "New call" to start.</div>
+</footer>
+
+<script>
+const log = document.getElementById("log");
+const talk = document.getElementById("talk");
+const startButton = document.getElementById("start");
+const status = document.getElementById("status");
+let stream = null, recorder = null, chunks = [], recordingStarted = 0, busy = false;
+
+function add(who, text, cls) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.innerHTML = `<div class="who">${who}</div><div class="urdu"></div>`;
+  div.querySelector(".urdu").textContent = text || "(nothing heard)";
+  log.appendChild(div);
+  div.scrollIntoView({ behavior: "smooth", block: "end" });
+  return div;
+}
+
+function showTimings(div, timings) {
+  const stages = ["stt", "agent", "tts"].filter(s => s in timings);
+  if (!stages.length) return;
+  const total = stages.reduce((sum, s) => sum + timings[s], 0) || 1;
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.innerHTML = stages.map(s => `<span style="width:${100 * timings[s] / total}%;background:var(--${s})"></span>`).join("");
+  const text = document.createElement("div");
+  text.className = "times";
+  text.textContent = stages.map(s => `${s.toUpperCase()} ${timings[s].toFixed(1)}s`).join(" · ") + `  ·  total ${total.toFixed(1)}s`;
+  div.append(bar, text);
+}
+
+function play(base64) {
+  return new Audio("data:audio/wav;base64," + base64).play();
+}
+
+startButton.onclick = async () => {
+  startButton.disabled = true;
+  status.textContent = "Starting call...";
+  log.innerHTML = "";
+  try {
+    const response = await fetch("/call", { method: "POST" });
+    const data = await response.json();
+    showTimings(add("Agent", data.reply, "agent"), data.timings);
+    play(data.audio);
+    talk.disabled = false;
+    status.textContent = "Hold the button and speak.";
+  } catch (e) {
+    status.textContent = "Could not start the call: " + e;
+  }
+  startButton.disabled = false;
+};
+
+async function startRecording() {
+  if (talk.disabled || busy || recorder) return;
+  try {
+    stream = stream || await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    status.textContent = "Microphone blocked: " + e.message;
+    return;
+  }
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = send;
+  recorder.start();
+  recordingStarted = performance.now();
+  talk.classList.add("recording");
+  talk.textContent = "Listening... let go to send";
+}
+
+function stopRecording() {
+  if (!recorder) return;
+  recorder.stop();
+  recorder = null;
+  talk.classList.remove("recording");
+  talk.textContent = "Hold to talk";
+}
+
+async function send() {
+  if (performance.now() - recordingStarted < 400) {
+    status.textContent = "Too short. Hold the button while you speak.";
+    return;
+  }
+  busy = true;
+  talk.disabled = true;
+  status.textContent = "Listening, thinking, speaking...";
+  const form = new FormData();
+  form.append("audio", new Blob(chunks, { type: chunks[0]?.type || "audio/webm" }), "speech.webm");
+  const sent = performance.now();
+  try {
+    const response = await fetch("/turn", { method: "POST", body: form });
+    if (!response.ok) throw new Error((await response.json()).detail || response.status);
+    const data = await response.json();
+    add("You (as Whisper heard it)", data.heard, "caller");
+    const agentDiv = add("Agent", data.reply, "agent");
+    if (data.tools.length) {
+      const tools = document.createElement("div");
+      tools.className = "tools";
+      tools.textContent = data.tools.map(t => `${t.tool}(${JSON.stringify(t.args)}) → ${JSON.stringify(t.result)}`).join("\n");
+      tools.style.whiteSpace = "pre-wrap";
+      agentDiv.appendChild(tools);
+    }
+    showTimings(agentDiv, data.timings);
+    play(data.audio);
+    status.textContent = `Reply ready ${((performance.now() - sent) / 1000).toFixed(1)}s after you let go.`;
+  } catch (e) {
+    status.textContent = "Something went wrong: " + e.message;
+  }
+  busy = false;
+  talk.disabled = false;
+}
+
+talk.addEventListener("pointerdown", startRecording);
+talk.addEventListener("pointerup", stopRecording);
+talk.addEventListener("pointerleave", stopRecording);
+document.addEventListener("keydown", e => { if (e.code === "Space" && !e.repeat) { e.preventDefault(); startRecording(); } });
+document.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); stopRecording(); } });
+</script>
+</body>
+</html>

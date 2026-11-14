@@ -9,14 +9,17 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "av<16",
+    "fastapi>=0.162.7",
     "faster-whisper>=1.2.1",
     "google-genai>=3.1.0",
     "httpx>=0.28.1",
     "jiwer>=4.0.0",
     "pyarrow>=26.0.1",
     "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.33",
     "torch>=2.15.0",
     "transformers>=5.23.0",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
