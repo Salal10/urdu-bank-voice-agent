@@ -1,6 +1,7 @@
 """The brain: Gemini with bank tools. Takes the caller's Urdu text, replies in Urdu script the TTS can say."""
 import functools
 import os
+import re
 import sys
 import time
 from datetime import date
@@ -17,6 +18,13 @@ load_dotenv()
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 RETRYABLE = ("429", "500", "503", "ReadError", "ConnectError", "RemoteProtocolError", "Timeout")
 GREETING = "السلام علیکم، بینک ہیلپ لائن میں خوش آمدید۔ میں آپ کی کیا مدد کر سکتا ہوں؟"
+
+# Phrases that claim an action happened -> the tool that must have succeeded in the same turn.
+CLAIMS = {
+    "transfer_to_officer": r"منتقل کر|منسلک کر|منسلک کی|ٹرانسفر کر",  # "I'm transferring / connecting you"
+    "file_complaint": r"درج کر (دی|لی|دیتا|رہا)|درج ہو گئی",          # "the complaint has been filed"
+    "confirm_block_card": r"بلاک کر دیا|بلاک ہو گیا",                 # "your card has been blocked"
+}
 
 # Digit words as Whisper writes them, including its common misspelling سفر for صفر (zero).
 SPOKEN_DIGITS = {"صفر": "0", "سفر": "0", "زیرو": "0", "ایک": "1", "دو": "2", "تین": "3", "چار": "4",
@@ -38,7 +46,7 @@ Rules:
 - Never guess or make up balances, numbers or dates. Only say what a tool returned.
 - Blocking a card has two steps: block_card, then read the last 4 digits back and ask the caller to confirm,
   then confirm_block_card only after they say yes.
-- If the caller didn't make a transaction or money was wrongly deducted, file a DisputedTransaction complaint and tell them the complaint number.
+- If the caller didn't make a transaction or money was wrongly deducted, file a DisputedTransaction complaint and tell them the complaint number.   First check get_recent_transactions and use the amounts from the bank's record in the description, not what you think you heard.
 - If verification fails, read back the account number you used so the caller can correct it.
 - If a tool returns an error, follow what the error says.
 - Transfer to an officer only when the caller asks for a person, the call is locked after failed verification,
@@ -154,11 +162,9 @@ def make_tools(call: Call, trace: list[dict], state: dict) -> list:
 
     @tool
     def get_branch_hours() -> dict:
-        """Get the bank branches' opening hours."""
-        return call.branch_hours()
-
-    return [verify_caller, get_balance, get_recent_transactions, list_cards, block_card,
-            confirm_block_card, file_complaint, transfer_to_officer, get_branch_hours]
+        """Get the bank branches' opening hours, already in Urdu: say them as they are."""
+        call.branch_hours()
+        return {"hours": "پیر سے جمعہ صبح 9 سے شام 5 بجے تک، ہفتے کو صبح 9 سے دوپہر 1 بجے تک، اتوار کو برانچ بند ہوتی ہے۔"}
 
 
 class Agent:
@@ -179,16 +185,38 @@ class Agent:
 
     def reply(self, caller_text: str) -> str:
         self.state["turn"] += 1
-        caller_text = numbers_from_speech(caller_text)
+        tools_before = len(self.trace)
+        text = self._send(numbers_from_speech(caller_text))
+
+        # Claim check: the reply says something happened, but the tool for it didn't succeed this turn.
+        # One second chance: tell the model, and it either calls the tool or rewrites its reply.
+        unbacked = self._claims_without_tool(text, tools_before)
+        if unbacked:
+            self.trace.append({"tool": "claim_check", "args": {"claimed": unbacked},
+                               "result": {"error": "claimed without calling the tool"}})
+            text = self._send(
+                f"[Automatic check, not the caller] Your reply says this was done, but you did not call "
+                f"{unbacked} in this turn, so nothing happened. If the caller wants it, call {unbacked} now. "
+                f"Otherwise rewrite your reply without saying it was done. Reply to the caller only.")
+        return text
+
+    def _claims_without_tool(self, text: str, tools_before: int) -> str | None:
+        succeeded = {step["tool"] for step in self.trace[tools_before:]
+                     if not (isinstance(step["result"], dict) and "error" in step["result"])}
+        for tool_name, pattern in CLAIMS.items():
+            if re.search(pattern, text) and tool_name not in succeeded:
+                return tool_name
+        return None
+
+    def _send(self, message: str) -> str:
         for attempt in range(5):
             try:
-                return (self.chat.send_message(caller_text).text or "").strip()
+                return (self.chat.send_message(message).text or "").strip()
             except Exception as e:  # rate limit, overloaded or network: wait and retry
                 if attempt == 4 or not any(code in f"{type(e).__name__} {e}" for code in RETRYABLE):
                     raise
                 print(f"   (retrying in {10 * 2 ** attempt}s: {type(e).__name__} {str(e)[:80]})")
                 time.sleep(10 * 2 ** attempt)
-
 
 def talk(agent: Agent, caller_text: str) -> None:
     tools_before = len(agent.trace)
