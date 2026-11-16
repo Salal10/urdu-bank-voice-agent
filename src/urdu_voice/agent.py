@@ -17,6 +17,7 @@ load_dotenv()
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 RETRYABLE = ("429", "500", "503", "ReadError", "ConnectError", "RemoteProtocolError", "Timeout")
+SORRY = "معاف کیجیے، میں سمجھ نہیں سکا۔ کیا آپ دوبارہ بتا سکتے ہیں؟"
 GREETING = "السلام علیکم، بینک ہیلپ لائن میں خوش آمدید۔ میں آپ کی کیا مدد کر سکتا ہوں؟"
 
 # Phrases that claim an action happened -> the tool that must have succeeded in the same turn.
@@ -166,6 +167,9 @@ def make_tools(call: Call, trace: list[dict], state: dict) -> list:
         call.branch_hours()
         return {"hours": "پیر سے جمعہ صبح 9 سے شام 5 بجے تک، ہفتے کو صبح 9 سے دوپہر 1 بجے تک، اتوار کو برانچ بند ہوتی ہے۔"}
 
+    return [verify_caller, get_balance, get_recent_transactions, list_cards, block_card,
+            confirm_block_card, file_complaint, transfer_to_officer, get_branch_hours]
+
 
 class Agent:
     """One conversation. Gemini decides which tools to call; the SDK runs them and sends the results back."""
@@ -173,12 +177,15 @@ class Agent:
     def __init__(self, call: Call):
         self.trace: list[dict] = []
         self.state = {"turn": 0, "pending_block": None}
+        tools = make_tools(call, self.trace, self.state)
+        if not tools:  # without tools the model still answers, confidently making up results
+            raise RuntimeError("make_tools returned no tools")
         self.client = genai.Client()  # keep a reference: a client that gets garbage-collected closes its connection
         self.chat = self.client.chats.create(
             model=MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
-                tools=make_tools(call, self.trace, self.state),
+                tools=tools,
                 temperature=0,
             ),
         )
@@ -187,6 +194,8 @@ class Agent:
         self.state["turn"] += 1
         tools_before = len(self.trace)
         text = self._send(numbers_from_speech(caller_text))
+        if not text:
+            text = self._send("[Automatic check, not the caller] Your reply was empty. Reply to the caller in Urdu.") or SORRY
 
         # Claim check: the reply says something happened, but the tool for it didn't succeed this turn.
         # One second chance: tell the model, and it either calls the tool or rewrites its reply.

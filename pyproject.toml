@@ -1,7 +1,7 @@
 [project]
 name = "urdu-voice"
 version = "0.1.0"
-description = "Add your description here"
+description = "Urdu voice assistant for bank customer calls, built with free models"
 readme = "README.md"
 authors = [
     { name = "Salal Yousuf", email = "85499847+Salal10@users.noreply.github.com" }

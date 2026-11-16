@@ -14,6 +14,8 @@ class UrduVoice:
 
     def say(self, text: str) -> np.ndarray:
         inputs = self.tokenizer(text, return_tensors="pt")
+        if inputs["input_ids"].shape[-1] < 3:  # nothing MMS can say (empty, or only characters it drops): it would crash
+            return np.zeros(self.sample_rate // 4, dtype=np.float32)
         torch.manual_seed(0)  # the model adds a little randomness to timing; a fixed seed gives the same audio every time
         with torch.no_grad():
             return self.model(**inputs).waveform[0].numpy()
